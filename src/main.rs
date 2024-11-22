@@ -1,0 +1,357 @@
+/*
+****************************************************
+
+     DPA to SASEBO（AES）
+
+     Version 01.00  2010.7.26
+
+
+                                 T.Asai
+
+****************************************************
+*/
+
+//update by Y.Nozaki(2016.4.25)
+//update by Y.Nozaki(2016.12.1)
+//update by S.Takemoto(2024.05.15)
+//update by S.Takemoto(2024.11.22)
+
+const DEBUG_SWITCH1: u8 = 0;
+
+const CMP_BCC: u8 = 0;
+const CMP_GCC: u8 = 0;
+
+use std::f64::consts::LOG10_E;
+use std::fs::File;
+use std::io::{self, BufRead, Write};
+use std::path::Path;
+use std::process::exit;
+
+type uint16_t = u16;
+
+const MAX_SAMPLE: usize = 200 - 1; // 解析に使用する消費電力波形のサンプル数
+const START_CNT: usize = 900; // 波形のサンプル点開始点
+const END_CNT: usize = 1100; // 波形のサンプル点終了点
+const MAX_DPA_COUNT: usize = 5000; // 解析に使用する波形数
+const CIPHER_FNAME: &str = "./dpa_aes_set/dpa_tool_zemi_v3/sasebo_aes_ctext_s00_kd0h.txt"; // 既知の暗号文のパス
+const KEY_FNAME: &str = "./dpa_aes_set/dpa_tool_zemi_v3/aes_r10_key_test_s00.txt";
+const WAVE_SRC_PATH: &str = "./dpa_aes_set/dpa_data_src_d0"; // 解析に使用する波形データのソースパス
+const WAVE_DST_PATH: &str = "./dpa_aes_set/dpa_results"; // 解析結果の保存場所
+
+static mut WAVE_SRC: [[f64; MAX_SAMPLE]; MAX_DPA_COUNT] = [[0.0; MAX_SAMPLE]; MAX_DPA_COUNT]; // 消費電力波形
+static mut WAVE_TIME: [f64; MAX_SAMPLE] = [0.0; MAX_SAMPLE]; // 時間
+static mut WAVE_GRP0: [f64; MAX_SAMPLE] = [0.0; MAX_SAMPLE]; // グループ0の消費電力波形
+static mut WAVE_GRP1: [f64; MAX_SAMPLE] = [0.0; MAX_SAMPLE]; // グループ1の消費電力波形
+static mut WAVE_GRP0_AVE: [f64; MAX_SAMPLE] = [0.0; MAX_SAMPLE]; // グループ0の平均電力
+static mut WAVE_GRP1_AVE: [f64; MAX_SAMPLE] = [0.0; MAX_SAMPLE]; // グループ1の平均電力
+
+// Inverse Sbox
+const INV_SBOX: [u8; 256] = [
+    0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38, 0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7, 0xfb,
+    0x7c, 0xe3, 0x39, 0x82, 0x9b, 0x2f, 0xff, 0x87, 0x34, 0x8e, 0x43, 0x44, 0xc4, 0xde, 0xe9, 0xcb,
+    0x54, 0x7b, 0x94, 0x32, 0xa6, 0xc2, 0x23, 0x3d, 0xee, 0x4c, 0x95, 0x0b, 0x42, 0xfa, 0xc3, 0x4e,
+    0x08, 0x2e, 0xa1, 0x66, 0x28, 0xd9, 0x24, 0xb2, 0x76, 0x5b, 0xa2, 0x49, 0x6d, 0x8b, 0xd1, 0x25,
+    0x72, 0xf8, 0xf6, 0x64, 0x86, 0x68, 0x98, 0x16, 0xd4, 0xa4, 0x5c, 0xcc, 0x5d, 0x65, 0xb6, 0x92,
+    0x6c, 0x70, 0x48, 0x50, 0xfd, 0xed, 0xb9, 0xda, 0x5e, 0x15, 0x46, 0x57, 0xa7, 0x8d, 0x9d, 0x84,
+    0x90, 0xd8, 0xab, 0x00, 0x8c, 0xbc, 0xd3, 0x0a, 0xf7, 0xe4, 0x58, 0x05, 0xb8, 0xb3, 0x45, 0x06,
+    0xd0, 0x2c, 0x1e, 0x8f, 0xca, 0x3f, 0x0f, 0x02, 0xc1, 0xaf, 0xbd, 0x03, 0x01, 0x13, 0x8a, 0x6b,
+    0x3a, 0x91, 0x11, 0x41, 0x4f, 0x67, 0xdc, 0xea, 0x97, 0xf2, 0xcf, 0xce, 0xf0, 0xb4, 0xe6, 0x73,
+    0x96, 0xac, 0x74, 0x22, 0xe7, 0xad, 0x35, 0x85, 0xe2, 0xf9, 0x37, 0xe8, 0x1c, 0x75, 0xdf, 0x6e,
+    0x47, 0xf1, 0x1a, 0x71, 0x1d, 0x29, 0xc5, 0x89, 0x6f, 0xb7, 0x62, 0x0e, 0xaa, 0x18, 0xbe, 0x1b,
+    0xfc, 0x56, 0x3e, 0x4b, 0xc6, 0xd2, 0x79, 0x20, 0x9a, 0xdb, 0xc0, 0xfe, 0x78, 0xcd, 0x5a, 0xf4,
+    0x1f, 0xdd, 0xa8, 0x33, 0x88, 0x07, 0xc7, 0x31, 0xb1, 0x12, 0x10, 0x59, 0x27, 0x80, 0xec, 0x5f,
+    0x60, 0x51, 0x7f, 0xa9, 0x19, 0xb5, 0x4a, 0x0d, 0x2d, 0xe5, 0x7a, 0x9f, 0x93, 0xc9, 0x9c, 0xef,
+    0xa0, 0xe0, 0x3b, 0x4d, 0xae, 0x2a, 0xf5, 0xb0, 0xc8, 0xeb, 0xbb, 0x3c, 0x83, 0x53, 0x99, 0x61,
+    0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d,
+];
+
+fn gf_mul_ab(a: uint16_t, b: uint16_t) -> uint16_t {
+    let mut c: uint16_t = 0;
+    for i in (0..8).rev() {
+        for k in (0..8).rev() {
+            c ^= (((a >> i) & 1) & ((b >> k) & 1)) << (i + k);
+        }
+    }
+
+    for i in (8..=14).rev() {
+        c ^= if (c & (1 << i)) != 0 {
+            0x1b << (i - 8)
+        } else {
+            0
+        };
+    }
+    c & 0xff
+}
+
+fn gf_inv_of_a(a: uint16_t) -> uint16_t {
+    let ap2 = gf_mul_ab(a, a);
+    let ap3 = gf_mul_ab(ap2, a);
+    let ap12 = gf_mul_ab(gf_mul_ab(ap3, ap3), gf_mul_ab(ap3, ap3));
+    let ap15 = gf_mul_ab(ap3, ap12);
+    let ap60 = gf_mul_ab(gf_mul_ab(ap15, ap15), gf_mul_ab(ap15, ap15));
+    let ap240 = gf_mul_ab(gf_mul_ab(ap60, ap60), gf_mul_ab(ap60, ap60));
+    let ap14 = gf_mul_ab(ap2, ap12);
+    let ap254 = gf_mul_ab(ap240, ap14);
+
+    ap254
+}
+
+fn sub_bytes_trans(a: uint16_t) -> uint16_t {
+    let b = gf_inv_of_a(a);
+    let mut r = 0;
+    for i in 0..8 {
+        r ^= if (b & (1 << i)) != 0 { 1 << i } else { 0 };
+        r ^= if (b & (1 << ((i + 4) % 8))) != 0 {
+            1 << i
+        } else {
+            0
+        };
+        r ^= if (b & (1 << ((i + 5) % 8))) != 0 {
+            1 << i
+        } else {
+            0
+        };
+        r ^= if (b & (1 << ((i + 6) % 8))) != 0 {
+            1 << i
+        } else {
+            0
+        };
+        r ^= if (b & (1 << ((i + 7) % 8))) != 0 {
+            1 << i
+        } else {
+            0
+        };
+    }
+    r ^= 0x63;
+    r
+}
+
+fn sub_bytes_trans_state(s: &[[uint16_t; 4]; 4], ssb: &mut [[uint16_t; 4]; 4]) {
+    for i in 0..4 {
+        for k in 0..4 {
+            ssb[i][k] = sub_bytes_trans(s[i][k]);
+        }
+    }
+}
+
+fn inv_sub_bytes_trans(a: uint16_t) -> uint16_t {
+    INV_SBOX[a as usize] as uint16_t
+}
+
+fn inv_sub_bytes_trans_state(s: &[[uint16_t; 4]; 4], ssb: &mut [[uint16_t; 4]; 4]) {
+    for i in 0..4 {
+        for k in 0..4 {
+            ssb[i][k] = inv_sub_bytes_trans(s[i][k]);
+        }
+    }
+}
+
+fn shift_rows_trans(s: &[[uint16_t; 4]; 4], ssft: &mut [[uint16_t; 4]; 4]) {
+    for i in 0..4 {
+        for k in 0..4 {
+            ssft[i][k] = s[i][(k + i) % 4];
+        }
+    }
+}
+
+fn inv_shift_rows_trans(s: &[[uint16_t; 4]; 4], ssft: &mut [[uint16_t; 4]; 4]) {
+    for i in 0..4 {
+        for k in 0..4 {
+            ssft[i][k] = s[i][(k + (4 - i)) % 4];
+        }
+    }
+}
+
+fn add_round_key_trans(s: &[[uint16_t; 4]; 4], k: &[uint16_t], sak: &mut [[uint16_t; 4]; 4]) {
+    for i in 0..4 {
+        sak[0][i] = s[0][i] ^ k[i * 4 + 0];
+        sak[1][i] = s[1][i] ^ k[i * 4 + 1];
+        sak[2][i] = s[2][i] ^ k[i * 4 + 2];
+        sak[3][i] = s[3][i] ^ k[i * 4 + 3];
+    }
+}
+
+fn evaluate_sf(cipher_text: &[uint16_t], key_w: &[uint16_t]) -> i32 {
+    let mut s1 = [[0u16; 4]; 4];
+    let mut s2 = [[0u16; 4]; 4];
+    let mut s3 = [[0u16; 4]; 4];
+    let mut s4 = [[0u16; 4]; 4];
+
+    // Set CipherText to State Array
+    for i in 0..4 {
+        for j in 0..4 {
+            s1[i][j] = cipher_text[i * 4 + j];
+        }
+    }
+
+    // Add Round Key
+    add_round_key_trans(&s1, &key_w[10 * 4 * 4..], &mut s2);
+
+    // Round 10
+    inv_shift_rows_trans(&s2, &mut s3);
+    inv_sub_bytes_trans_state(&s3, &mut s4);
+
+    // Selection Function
+    let mut transition_bits = [0; 8];
+
+    let mut transition = |i: usize, a: u16| {
+        transition_bits[i] = if a & 0xa != 0 { 1 } else { 0 };
+    };
+    transition(7, 0x80);
+    transition(6, 0x40);
+    transition(5, 0x20);
+    transition(4, 0x10);
+    transition(3, 0x08);
+    transition(2, 0x04);
+    transition(1, 0x02);
+    transition(0, 0x01);
+
+    // ハミング距離の計算
+    let mut transition_counts = 0;
+    for i in 0..8 {
+        transition_counts += transition_bits[i];
+    }
+
+    // 波形振り分けのためのグループ
+    if transition_counts >= 4 {
+        1
+    } else {
+        0
+    }
+}
+
+fn main() {
+    let mut key_w = [0u16; 176];
+    let mut wave_grp0_cnt = 0;
+    let mut wave_grp1_cnt = 0;
+    let mut wave_grp2_cnt = 0;
+
+    let key_file = File::open(KEY_FNAME).expect("[Key] file open error!!");
+    let key_lines = io::BufReader::new(key_file).lines();
+
+    let cipher_file = File::open(CIPHER_FNAME).expect("[Cipher Text] file open error!!");
+
+    println!("Read waveform data...");
+    for dpa_no in 0..MAX_DPA_COUNT {
+        let wave_src_file_name = format!("{}/waveData{}.csv", WAVE_SRC_PATH, dpa_no);
+        let wave_src_file =
+            File::open(&wave_src_file_name).expect("[Wave Source File] file open error!!");
+        let wave_src_lines = io::BufReader::new(wave_src_file).lines();
+
+        for (wave_data_cnt, line) in wave_src_lines.enumerate() {
+            if wave_data_cnt > START_CNT && wave_data_cnt < END_CNT {
+                let line = line.expect("Failed to read line");
+                let parts: Vec<&str> = line.split(',').collect();
+                let wave_time_axis: f64 = parts[0].parse().expect("Failed to parse wave time axis");
+                let wave_amplitude: f64 = parts[1].parse().expect("Failed to parse wave amplitude");
+
+                unsafe {
+                    WAVE_SRC[dpa_no][wave_data_cnt - START_CNT - 1] = wave_amplitude;
+                    if dpa_no == 0 {
+                        WAVE_TIME[wave_data_cnt - START_CNT - 1] = wave_time_axis;
+                    }
+                }
+            }
+        }
+    }
+    println!("\tfinish!");
+
+    println!("Differential power analysis...");
+    for (partial_key_no, key_line) in key_lines.enumerate() {
+        let key_line = key_line.expect("Failed to read key line");
+        let key_bytes: Vec<u8> = key_line
+            .split_whitespace()
+            .map(|s| u8::from_str_radix(s, 16).expect("Failed to parse key byte"))
+            .collect();
+        for (i, &byte) in key_bytes.iter().enumerate() {
+            key_w[i + 160] = byte as uint16_t;
+        }
+
+        unsafe {
+            for wave_data_cnt in 0..(END_CNT - START_CNT) {
+                WAVE_GRP0[wave_data_cnt] = 0.0;
+                WAVE_GRP1[wave_data_cnt] = 0.0;
+                WAVE_GRP0_AVE[wave_data_cnt] = 0.0;
+                WAVE_GRP1_AVE[wave_data_cnt] = 0.0;
+            }
+        }
+        wave_grp0_cnt = 0;
+        wave_grp1_cnt = 0;
+        wave_grp2_cnt = 0;
+
+        // 指定した波形数分の解析を行う
+        let cipher_lines =
+            io::BufReader::new(cipher_file.try_clone().expect("faild clone cipher file")).lines();
+
+        for (dpa_no, cipher_line) in cipher_lines.enumerate() {
+            if dpa_no >= MAX_DPA_COUNT {
+                break;
+            }
+            let cipher_line = cipher_line.expect("Failed to read cipher line");
+            let cipher_bytes: Vec<u8> = cipher_line
+                .split_whitespace()
+                .map(|s| u8::from_str_radix(s, 16).expect("Failed to parse cipher byte"))
+                .collect();
+            let cipher_text: Vec<uint16_t> = cipher_bytes.iter().map(|&b| b as uint16_t).collect();
+
+            // for i in 0..16 {
+            //     key_w[i + 160] = key_buf_bin[i];
+            // }
+            // 選択関数によって波形データを振り分けるグループを決定
+            let sf_group = evaluate_sf(&cipher_text, &key_w);
+
+            unsafe {
+                // 選択関数によって波形データを振り分ける
+                for wave_data_cnt in 0..(END_CNT - START_CNT) {
+                    if sf_group == 1 {
+                        WAVE_GRP1[wave_data_cnt] += WAVE_SRC[dpa_no][wave_data_cnt];
+                    } else if sf_group == 0 {
+                        WAVE_GRP0[wave_data_cnt] += WAVE_SRC[dpa_no][wave_data_cnt];
+                    }
+                }
+            }
+            // 各グループの波形数をカウント
+            if sf_group == 1 {
+                wave_grp1_cnt += 1;
+            } else if sf_group == 0 {
+                wave_grp0_cnt += 1;
+            } else {
+                wave_grp2_cnt += 1;
+            }
+            // DPAの結果をファイルに出力
+            let wave_diff_file_name =
+                format!("{}/waveDiff_Key{:03}.csv", WAVE_DST_PATH, partial_key_no);
+            let mut wave_diff_file = File::create(&wave_diff_file_name)
+                .expect("[Wave Differential File] file create error!!");
+            for wave_data_cnt in 0..(END_CNT - START_CNT) {
+                unsafe {
+                    // 各グループで平均電力を計算
+                    let devider = if wave_grp0_cnt != 0 {
+                        wave_grp0_cnt as f64
+                    } else {
+                        1.0
+                    };
+                    WAVE_GRP0_AVE[wave_data_cnt] = WAVE_GRP0[wave_data_cnt] / devider;
+                    let devider = if wave_grp1_cnt != 0 {
+                        wave_grp1_cnt as f64
+                    } else {
+                        1.0
+                    };
+                    WAVE_GRP1_AVE[wave_data_cnt] = WAVE_GRP1[wave_data_cnt] / devider;
+                }
+                // 差分電力を計算 ファイルに書き込み
+                wave_diff_file
+                    .write_all(
+                        format!(
+                            "{:.10},{:.15}\n",
+                            unsafe { WAVE_TIME[wave_data_cnt] * 1000000.0 },
+                            unsafe { WAVE_GRP0_AVE[wave_data_cnt] - WAVE_GRP1_AVE[wave_data_cnt] }
+                        )
+                        .as_bytes(),
+                    )
+                    .expect("[Wave Differential File] file write error!!");
+            }
+        }
+    }
+    println!("\tfinish!");
+}
