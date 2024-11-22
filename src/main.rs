@@ -5,16 +5,8 @@
 
      Version 01.00  2010.7.26
 
-
-                                 T.Asai
-
 ****************************************************
 */
-
-//update by Y.Nozaki(2016.4.25)
-//update by Y.Nozaki(2016.12.1)
-//update by S.Takemoto(2024.05.15)
-//update by S.Takemoto(2024.11.22)
 
 const DEBUG_SWITCH1: u8 = 0;
 
@@ -236,14 +228,22 @@ fn main() {
         let wave_src_file_name = format!("{}/waveData{}.csv", WAVE_SRC_PATH, dpa_no);
         let wave_src_file =
             File::open(&wave_src_file_name).expect("[Wave Source File] file open error!!");
+        println!("wavesrcfilename: {}", wave_src_file_name);
         let wave_src_lines = io::BufReader::new(wave_src_file).lines();
 
         for (wave_data_cnt, line) in wave_src_lines.enumerate() {
             if wave_data_cnt > START_CNT && wave_data_cnt < END_CNT {
                 let line = line.expect("Failed to read line");
                 let parts: Vec<&str> = line.split(',').collect();
-                let wave_time_axis: f64 = parts[0].parse().expect("Failed to parse wave time axis");
-                let wave_amplitude: f64 = parts[1].parse().expect("Failed to parse wave amplitude");
+                // 空白が混じっていてパース失敗するケースがあったのでtrimする
+                let wave_time_axis: f64 = parts[0]
+                    .trim()
+                    .parse()
+                    .expect("Failed to parse wave time axis");
+                let wave_amplitude: f64 = parts[1]
+                    .trim()
+                    .parse()
+                    .expect("Failed to parse wave amplitude");
 
                 unsafe {
                     WAVE_SRC[dpa_no][wave_data_cnt - START_CNT - 1] = wave_amplitude;
@@ -269,10 +269,16 @@ fn main() {
 
         unsafe {
             for wave_data_cnt in 0..(END_CNT - START_CNT) {
-                WAVE_GRP0[wave_data_cnt] = 0.0;
-                WAVE_GRP1[wave_data_cnt] = 0.0;
-                WAVE_GRP0_AVE[wave_data_cnt] = 0.0;
-                WAVE_GRP1_AVE[wave_data_cnt] = 0.0;
+                // indexの範囲外アクセスを起こしている
+                // WAVE_GRP0[wave_data_cnt] = 0.0;
+                // WAVE_GRP1[wave_data_cnt] = 0.0;
+                // WAVE_GRP0_AVE[wave_data_cnt] = 0.0;
+                // WAVE_GRP1_AVE[wave_data_cnt] = 0.0;
+                // 代替手段としてイテレータを使って初期化する
+                WAVE_GRP0.iter_mut().for_each(|x| *x = 0.0);
+                WAVE_GRP1.iter_mut().for_each(|x| *x = 0.0);
+                WAVE_GRP0_AVE.iter_mut().for_each(|x| *x = 0.0);
+                WAVE_GRP1_AVE.iter_mut().for_each(|x| *x = 0.0);
             }
         }
         wave_grp0_cnt = 0;
@@ -302,7 +308,8 @@ fn main() {
 
             unsafe {
                 // 選択関数によって波形データを振り分ける
-                for wave_data_cnt in 0..(END_CNT - START_CNT) {
+                // インデックスの範囲外アクセス対策で，-1している
+                for wave_data_cnt in 0..(END_CNT - START_CNT - 1) {
                     if sf_group == 1 {
                         WAVE_GRP1[wave_data_cnt] += WAVE_SRC[dpa_no][wave_data_cnt];
                     } else if sf_group == 0 {
@@ -323,7 +330,8 @@ fn main() {
                 format!("{}/waveDiff_Key{:03}.csv", WAVE_DST_PATH, partial_key_no);
             let mut wave_diff_file = File::create(&wave_diff_file_name)
                 .expect("[Wave Differential File] file create error!!");
-            for wave_data_cnt in 0..(END_CNT - START_CNT) {
+            // インデックスの範囲外アクセス対策で，-1している
+            for wave_data_cnt in 0..(END_CNT - START_CNT - 1) {
                 unsafe {
                     // 各グループで平均電力を計算
                     let devider = if wave_grp0_cnt != 0 {
