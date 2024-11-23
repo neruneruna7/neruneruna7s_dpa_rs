@@ -206,7 +206,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut wave_grp1_cnt = 0;
     let mut wave_grp2_cnt = 0;
 
-    read_wavedata();
+    read_wavedata()?;
 
     let key_file = File::open(KEY_FNAME).expect("[Key] file open error!!");
     let key_lines = io::BufReader::new(key_file).lines();
@@ -307,7 +307,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             let right = (WAVE_GRP1_AVE.lock()?[wave_data_cnt]
                 - WAVE_GRP0_AVE.lock()?[wave_data_cnt])
                 * 1000.0;
-            writeln!(writer, "{:.10},{:.15}", left, right).unwrap();
+            writeln!(writer, "{:.10},{:.15}", left, right)?;
             // println!(
             //     "GR1: {:?}, GR0: {:?}",
             //     WAVE_GRP1_AVE.lock()?[wave_data_cnt],
@@ -315,7 +315,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             // );
             // println!("{:.10},{:.15}", left, right);
         }
-        writer.flush().unwrap();
+        writer.flush()?;
         println!("Partial Key No: {:03} finish!", partial_key_no);
     }
     println!("\tfinish!");
@@ -345,7 +345,7 @@ fn init_analyze_var(
     Ok(())
 }
 
-fn read_wavedata() {
+fn read_wavedata() -> Result<(), Box<dyn Error>> {
     println!("Read waveform data...");
     for dpa_no in 0..MAX_DPA_COUNT {
         let wave_src_file_name = format!("{}/waveData{}.csv", WAVE_SRC_PATH, dpa_no);
@@ -367,14 +367,15 @@ fn read_wavedata() {
                     .trim()
                     .parse()
                     .expect("Failed to parse wave amplitude");
-                WAVE_SRC.lock().unwrap()[dpa_no][wave_data_cnt - START_CNT - 1] = wave_amplitude;
+                WAVE_SRC.lock()?[dpa_no][wave_data_cnt - START_CNT - 1] = wave_amplitude;
                 if dpa_no == 0 {
-                    WAVE_TIME.lock().unwrap()[wave_data_cnt - START_CNT - 1] = wave_time_axis;
+                    WAVE_TIME.lock()?[wave_data_cnt - START_CNT - 1] = wave_time_axis;
                 }
             }
         }
     }
     println!("\tfinish!");
+    Ok(())
 }
 
 #[cfg(test)]
