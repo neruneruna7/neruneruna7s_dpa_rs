@@ -9,6 +9,8 @@ use std::fs::File;
 use std::io::{self, BufRead, Write};
 use std::sync::{LazyLock, Mutex};
 
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
+
 const MAX_SAMPLE: usize = 200 - 1; // 解析に使用する消費電力波形のサンプル数
 const START_CNT: usize = 900; // 波形のサンプル点開始点
 const END_CNT: usize = 1100; // 波形のサンプル点終了点
@@ -206,7 +208,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut wave_grp1_cnt = 0;
     let mut wave_grp2_cnt = 0;
 
-    read_wavedata()?;
+    // read_wavedata(WAVE_SRC_PATH)?;
+    read_wavedata_parallel(WAVE_SRC_PATH)?;
 
     let key_file = File::open(KEY_FNAME).expect("[Key] file open error!!");
     let key_lines = io::BufReader::new(key_file).lines();
@@ -345,10 +348,10 @@ fn init_analyze_var(
     Ok(())
 }
 
-fn read_wavedata() -> Result<(), Box<dyn Error>> {
+fn read_wavedata(folder_path: &str) -> Result<(), Box<dyn Error>> {
     println!("Read waveform data...");
     for dpa_no in 0..MAX_DPA_COUNT {
-        let wave_src_file_name = format!("{}/waveData{}.csv", WAVE_SRC_PATH, dpa_no);
+        let wave_src_file_name = format!("{}/waveData{}.csv", folder_path, dpa_no);
         let wave_src_file =
             File::open(&wave_src_file_name).expect("[Wave Source File] file open error!!");
         println!("wavesrcfilename: {}", wave_src_file_name);
@@ -375,6 +378,36 @@ fn read_wavedata() -> Result<(), Box<dyn Error>> {
         }
     }
     println!("\tfinish!");
+    Ok(())
+}
+
+fn read_wavedata_parallel(folder_path: &str) -> Result<(), Box<dyn Error>> {
+    (0..MAX_DPA_COUNT).into_par_iter().for_each(|dpa_no| {
+        let file_name = format!("{}/waveData{}.csv", folder_path, dpa_no);
+        println!("wavesrcfilename: {}", &file_name);
+        let wave_src_file = File::open(file_name).expect("file open error");
+        let wave_src_lines = io::BufReader::new(wave_src_file).lines();
+
+        for (wave_data_cnt, line) in wave_src_lines.enumerate() {
+            if wave_data_cnt > START_CNT && wave_data_cnt < END_CNT {
+                let line = line.expect("Failed to read line");
+                let parts: Vec<&str> = line.split(',').collect();
+                // 空白が混じっていてパース失敗するケースがあったのでtrimする
+                let wave_time_axis: f64 = parts[0]
+                    .trim()
+                    .parse()
+                    .expect("Failed to parse wave time axis");
+                let wave_amplitude: f64 = parts[1]
+                    .trim()
+                    .parse()
+                    .expect("Failed to parse wave amplitude");
+                WAVE_SRC.lock().unwrap()[dpa_no][wave_data_cnt - START_CNT - 1] = wave_amplitude;
+                if dpa_no == 0 {
+                    WAVE_TIME.lock().unwrap()[wave_data_cnt - START_CNT - 1] = wave_time_axis;
+                }
+            }
+        }
+    });
     Ok(())
 }
 
@@ -415,5 +448,12 @@ mod tests {
                 assert_eq!(c_line, rust_line);
             }
         }
+    }
+
+    // 並列ファイル読み込みのテスト
+    #[test]
+    fn test_read_file_parallel() {
+        let file_path = "./dpa_aes_set/dpa_data_src_d0";
+        super::read_wavedata_parallel(file_path).expect("Failed to read file parallel");
     }
 }
