@@ -9,7 +9,7 @@ use std::fs::File;
 use std::io::{self, BufRead, Write};
 use std::sync::{LazyLock, Mutex};
 
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
+use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 
 const MAX_SAMPLE: usize = 200 - 1; // 解析に使用する消費電力波形のサンプル数
 const START_CNT: usize = 900; // 波形のサンプル点開始点
@@ -237,6 +237,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         wave_grp2_cnt,
         cipher_text,
     )?;
+    // power_analysis_parallel(key_lines, cipher_text)?;
     println!("\tfinish!");
     Ok(())
 }
@@ -343,6 +344,119 @@ fn power_analysis(
     })
 }
 
+fn power_analysis_parallel(
+    key_lines: io::Lines<io::BufReader<File>>,
+    cipher_text: Vec<Vec<u8>>,
+) -> anyhow::Result<()> {
+    let mut keys = Vec::new();
+    for k in key_lines.into_iter() {
+        keys.push(k.expect("Failed to read key line"));
+    }
+
+    keys.into_par_iter()
+        .enumerate()
+        .try_for_each(|(partial_key_no, key_line)| {
+            let key_bytes: Vec<u8> = key_line
+                .split_whitespace()
+                .map(|s| u8::from_str_radix(s, 16).expect("Failed to parse key byte"))
+                .collect();
+            let mut key_w = vec![0u16; 176];
+            let mut wave_grp0_cnt = 0;
+            let mut wave_grp1_cnt = 0;
+            let mut wave_grp2_cnt = 0;
+
+            for (i, &byte) in key_bytes.iter().enumerate() {
+                key_w[i + 160] = byte as u16;
+            }
+            init_analyze_var(&mut wave_grp0_cnt, &mut wave_grp1_cnt, &mut wave_grp2_cnt).unwrap();
+
+            // DPAの結果をファイルに出力準備
+            let wave_diff_file_name =
+                format!("{}/waveDiff_Key{:03}.csv", WAVE_DST_PATH, partial_key_no);
+            println!("wavediffilename: {}", wave_diff_file_name);
+            let wave_diff_file = File::create(&wave_diff_file_name)
+                .expect("[Wave Differential File] file create error!!");
+            let mut writer = io::BufWriter::new(wave_diff_file);
+
+            for (dpa_no, cipher_bytes) in cipher_text.iter().enumerate() {
+                if dpa_no >= MAX_DPA_COUNT {
+                    println!("BREAK: dpa_no: {}", dpa_no);
+                    break;
+                }
+                let cipher_text: Vec<u16> = cipher_bytes.iter().map(|&b| b as u16).collect();
+                // println!("no: {} cipher_text: {:?}", dpa_no, cipher_text);
+
+                // for i in 0..16 {
+                //     key_w[i + 160] = key_bytes[i] as u16;
+                // }
+                // 選択関数によって波形データを振り分けるグループを決定
+                let sf_group = evaluate_sf(&cipher_text, &key_w);
+
+                // 選択関数によって波形データを振り分ける
+                // インデックスの範囲外アクセス対策で，-1している
+                for wave_data_cnt in 0..(END_CNT - START_CNT - 1) {
+                    if sf_group == 1 {
+                        WAVE_GRP1.lock().unwrap()[wave_data_cnt] +=
+                            WAVE_SRC.lock().unwrap()[dpa_no][wave_data_cnt];
+                    } else if sf_group == 0 {
+                        WAVE_GRP0.lock().unwrap()[wave_data_cnt] +=
+                            WAVE_SRC.lock().unwrap()[dpa_no][wave_data_cnt];
+                    }
+                    // println!("wave_src: {}", WAVE_SRC.lock()?[dpa_no][wave_data_cnt]);
+                    // println!("wave_grp0: {}", WAVE_GRP0.lock()?[wave_data_cnt]);
+                    // println!("wave_grp1: {}", WAVE_GRP1.lock()?[wave_data_cnt]);
+
+                    // println!("wave_src: {}", unsafe { WAVE_SRC[dpa_no][wave_data_cnt] });
+                }
+                // 各グループの波形数をカウント
+                if sf_group == 1 {
+                    wave_grp1_cnt += 1;
+                } else if sf_group == 0 {
+                    wave_grp0_cnt += 1;
+                } else {
+                    wave_grp2_cnt += 1;
+                }
+            }
+            // println!("wave_grp1: {:?}", WAVE_GRP1.lock()?);
+
+            // インデックスの範囲外アクセス対策で，-1している
+            for wave_data_cnt in 0..(END_CNT - START_CNT - 1) {
+                // 各グループで平均電力を計算
+                let devider = if wave_grp0_cnt != 0 {
+                    wave_grp0_cnt as f64
+                } else {
+                    1.0
+                };
+                WAVE_GRP0_AVE.lock().unwrap()[wave_data_cnt] =
+                    WAVE_GRP0.lock().unwrap()[wave_data_cnt] / devider;
+
+                let devider = if wave_grp1_cnt != 0 {
+                    wave_grp1_cnt as f64
+                } else {
+                    1.0
+                };
+                WAVE_GRP1_AVE.lock().unwrap()[wave_data_cnt] =
+                    WAVE_GRP1.lock().unwrap()[wave_data_cnt] / devider;
+
+                // 差分電力を計算 ファイルに書き込み
+                let left = WAVE_TIME.lock().unwrap()[wave_data_cnt] * 1000000.0;
+                let right = (WAVE_GRP1_AVE.lock().unwrap()[wave_data_cnt]
+                    - WAVE_GRP0_AVE.lock().unwrap()[wave_data_cnt])
+                    * 1000.0;
+                writeln!(writer, "{:.10},{:.15}", left, right)?;
+                // println!(
+                //     "GR1: {:?}, GR0: {:?}",
+                //     WAVE_GRP1_AVE.lock()?[wave_data_cnt],
+                //     WAVE_GRP0_AVE.lock()?[wave_data_cnt]
+                // );
+                // println!("{:.10},{:.15}", left, right);
+            }
+            writer.flush()?;
+            println!("Partial Key No: {:03} finish!", partial_key_no);
+            Ok(())
+        })
+}
+
 fn init_analyze_var(
     wave_grp0_cnt: &mut i32,
     wave_grp1_cnt: &mut i32,
@@ -399,11 +513,11 @@ fn read_wavedata(folder_path: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn read_wavedata_parallel(folder_path: &str) -> Result<(), Box<dyn Error>> {
-    (0..MAX_DPA_COUNT).into_par_iter().for_each(|dpa_no| {
+fn read_wavedata_parallel(folder_path: &str) -> anyhow::Result<()> {
+    (0..MAX_DPA_COUNT).into_par_iter().try_for_each(|dpa_no| {
         let file_name = format!("{}/waveData{}.csv", folder_path, dpa_no);
         println!("wavesrcfilename: {}", &file_name);
-        let wave_src_file = File::open(file_name).expect("file open error");
+        let wave_src_file = File::open(file_name)?;
         let wave_src_lines = io::BufReader::new(wave_src_file).lines();
 
         for (wave_data_cnt, line) in wave_src_lines.enumerate() {
@@ -425,8 +539,19 @@ fn read_wavedata_parallel(folder_path: &str) -> Result<(), Box<dyn Error>> {
                 }
             }
         }
+        Ok(())
+    })
+}
+
+fn f() {
+    let numbers = vec![1, 2, 3, 4, 5];
+    let result = numbers.iter().try_for_each(|&num| {
+        if num % 2 == 0 {
+            Ok(())
+        } else {
+            Err("Odd number found")
+        }
     });
-    Ok(())
 }
 
 #[cfg(test)]
@@ -437,7 +562,7 @@ mod tests {
     };
 
     // C実装で出力されたものと，Rust実装で出力されたものが一致するか確認する
-    const C_RESULT_PATH: &str = "../dpa_c/dpa_aes_set/dpa_results";
+    const C_RESULT_PATH: &str = "./dpa_aes_set/test_dpa_results";
     const RUST_RESULT_PATH: &str = "./dpa_aes_set/dpa_results";
 
     #[test]
