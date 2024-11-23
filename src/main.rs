@@ -13,11 +13,13 @@ const DEBUG_SWITCH1: u8 = 0;
 const CMP_BCC: u8 = 0;
 const CMP_GCC: u8 = 0;
 
+use std::error::Error;
 use std::f64::consts::LOG10_E;
 use std::fs::File;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 use std::process::exit;
+use std::sync::{LazyLock, Mutex};
 
 type uint16_t = u16;
 
@@ -30,12 +32,19 @@ const KEY_FNAME: &str = "./dpa_aes_set/dpa_tool_zemi_v3/aes_r10_key_test_s00.txt
 const WAVE_SRC_PATH: &str = "./dpa_aes_set/dpa_data_src_d0"; // 解析に使用する波形データのソースパス
 const WAVE_DST_PATH: &str = "./dpa_aes_set/dpa_results"; // 解析結果の保存場所
 
-static mut WAVE_SRC: [[f64; MAX_SAMPLE]; MAX_DPA_COUNT] = [[0.0; MAX_SAMPLE]; MAX_DPA_COUNT]; // 消費電力波形
-static mut WAVE_TIME: [f64; MAX_SAMPLE] = [0.0; MAX_SAMPLE]; // 時間
-static mut WAVE_GRP0: [f64; MAX_SAMPLE] = [0.0; MAX_SAMPLE]; // グループ0の消費電力波形
-static mut WAVE_GRP1: [f64; MAX_SAMPLE] = [0.0; MAX_SAMPLE]; // グループ1の消費電力波形
-static mut WAVE_GRP0_AVE: [f64; MAX_SAMPLE] = [0.0; MAX_SAMPLE]; // グループ0の平均電力
-static mut WAVE_GRP1_AVE: [f64; MAX_SAMPLE] = [0.0; MAX_SAMPLE]; // グループ1の平均電力
+// サイズがデカくてスタックに置けないので，ヒープに置く
+static WAVE_SRC: LazyLock<Mutex<Vec<[f64; MAX_SAMPLE]>>> =
+    LazyLock::new(|| Mutex::new(vec![[0.0; MAX_SAMPLE]; MAX_DPA_COUNT])); // 消費電力波形
+static WAVE_TIME: LazyLock<Mutex<Box<[f64; MAX_SAMPLE]>>> =
+    LazyLock::new(|| Mutex::new(Box::new([0.0; MAX_SAMPLE]))); // 時間
+static WAVE_GRP0: LazyLock<Mutex<Box<[f64; MAX_SAMPLE]>>> =
+    LazyLock::new(|| Mutex::new(Box::new([0.0; MAX_SAMPLE]))); // グループ0の消費電力波形
+static WAVE_GRP1: LazyLock<Mutex<Box<[f64; MAX_SAMPLE]>>> =
+    LazyLock::new(|| Mutex::new(Box::new([0.0; MAX_SAMPLE]))); // グループ1の消費電力波形
+static WAVE_GRP0_AVE: LazyLock<Mutex<Box<[f64; MAX_SAMPLE]>>> =
+    LazyLock::new(|| Mutex::new(Box::new([0.0; MAX_SAMPLE]))); // グループ0の平均電力
+static WAVE_GRP1_AVE: LazyLock<Mutex<Box<[f64; MAX_SAMPLE]>>> =
+    LazyLock::new(|| Mutex::new(Box::new([0.0; MAX_SAMPLE]))); // グループ1の平均電力
 
 // Inverse Sbox
 const INV_SBOX: [u8; 256] = [
@@ -91,28 +100,19 @@ fn gf_inv_of_a(a: uint16_t) -> uint16_t {
 fn sub_bytes_trans(a: uint16_t) -> uint16_t {
     let b = gf_inv_of_a(a);
     let mut r = 0;
+    let trans = |i: usize| -> u16 {
+        if (b & (1 << i)) != 0 {
+            1 << i
+        } else {
+            0
+        }
+    };
     for i in 0..8 {
-        r ^= if (b & (1 << i)) != 0 { 1 << i } else { 0 };
-        r ^= if (b & (1 << ((i + 4) % 8))) != 0 {
-            1 << i
-        } else {
-            0
-        };
-        r ^= if (b & (1 << ((i + 5) % 8))) != 0 {
-            1 << i
-        } else {
-            0
-        };
-        r ^= if (b & (1 << ((i + 6) % 8))) != 0 {
-            1 << i
-        } else {
-            0
-        };
-        r ^= if (b & (1 << ((i + 7) % 8))) != 0 {
-            1 << i
-        } else {
-            0
-        };
+        r ^= trans(i);
+        r ^= trans((i + 4) % 8);
+        r ^= trans((i + 5) % 8);
+        r ^= trans((i + 6) % 8);
+        r ^= trans((i + 7) % 8);
     }
     r ^= 0x63;
     r
@@ -175,6 +175,7 @@ fn evaluate_sf(cipher_text: &[uint16_t], key_w: &[uint16_t]) -> i32 {
             s1[i][j] = cipher_text[i * 4 + j];
         }
     }
+    // println!("s1: {:?}", s1);
 
     // Add Round Key
     add_round_key_trans(&s1, &key_w[10 * 4 * 4..], &mut s2);
@@ -187,7 +188,7 @@ fn evaluate_sf(cipher_text: &[uint16_t], key_w: &[uint16_t]) -> i32 {
     let mut transition_bits = [0; 8];
 
     let mut transition = |i: usize, a: u16| {
-        transition_bits[i] = if a & 0xa != 0 { 1 } else { 0 };
+        transition_bits[i] = if (s1[0][0] ^ s4[0][0]) & a != 0 { 1 } else { 0 };
     };
     transition(7, 0x80);
     transition(6, 0x40);
@@ -197,6 +198,7 @@ fn evaluate_sf(cipher_text: &[uint16_t], key_w: &[uint16_t]) -> i32 {
     transition(2, 0x04);
     transition(1, 0x02);
     transition(0, 0x01);
+    // println!("transition_bits: {:?}", transition_bits);
 
     // ハミング距離の計算
     let mut transition_counts = 0;
@@ -212,16 +214,11 @@ fn evaluate_sf(cipher_text: &[uint16_t], key_w: &[uint16_t]) -> i32 {
     }
 }
 
-fn main() {
-    let mut key_w = [0u16; 176];
+fn main() -> Result<(), Box<dyn Error>> {
+    let mut key_w = vec![0u16; 176];
     let mut wave_grp0_cnt = 0;
     let mut wave_grp1_cnt = 0;
     let mut wave_grp2_cnt = 0;
-
-    let key_file = File::open(KEY_FNAME).expect("[Key] file open error!!");
-    let key_lines = io::BufReader::new(key_file).lines();
-
-    let cipher_file = File::open(CIPHER_FNAME).expect("[Cipher Text] file open error!!");
 
     println!("Read waveform data...");
     for dpa_no in 0..MAX_DPA_COUNT {
@@ -244,17 +241,19 @@ fn main() {
                     .trim()
                     .parse()
                     .expect("Failed to parse wave amplitude");
-
-                unsafe {
-                    WAVE_SRC[dpa_no][wave_data_cnt - START_CNT - 1] = wave_amplitude;
-                    if dpa_no == 0 {
-                        WAVE_TIME[wave_data_cnt - START_CNT - 1] = wave_time_axis;
-                    }
+                WAVE_SRC.lock().unwrap()[dpa_no][wave_data_cnt - START_CNT - 1] = wave_amplitude;
+                if dpa_no == 0 {
+                    WAVE_TIME.lock().unwrap()[wave_data_cnt - START_CNT - 1] = wave_time_axis;
                 }
             }
         }
     }
     println!("\tfinish!");
+
+    let key_file = File::open(KEY_FNAME).expect("[Key] file open error!!");
+    let key_lines = io::BufReader::new(key_file).lines();
+
+    let cipher_file = File::open(CIPHER_FNAME).expect("[Cipher Text] file open error!!");
 
     println!("Differential power analysis...");
     for (partial_key_no, key_line) in key_lines.enumerate() {
@@ -267,19 +266,17 @@ fn main() {
             key_w[i + 160] = byte as uint16_t;
         }
 
-        unsafe {
-            for wave_data_cnt in 0..(END_CNT - START_CNT) {
-                // indexの範囲外アクセスを起こしている
-                // WAVE_GRP0[wave_data_cnt] = 0.0;
-                // WAVE_GRP1[wave_data_cnt] = 0.0;
-                // WAVE_GRP0_AVE[wave_data_cnt] = 0.0;
-                // WAVE_GRP1_AVE[wave_data_cnt] = 0.0;
-                // 代替手段としてイテレータを使って初期化する
-                WAVE_GRP0.iter_mut().for_each(|x| *x = 0.0);
-                WAVE_GRP1.iter_mut().for_each(|x| *x = 0.0);
-                WAVE_GRP0_AVE.iter_mut().for_each(|x| *x = 0.0);
-                WAVE_GRP1_AVE.iter_mut().for_each(|x| *x = 0.0);
-            }
+        for _wave_data_cnt in 0..(END_CNT - START_CNT) {
+            // indexの範囲外アクセスを起こしている
+            // WAVE_GRP0[wave_data_cnt] = 0.0;
+            // WAVE_GRP1[wave_data_cnt] = 0.0;
+            // WAVE_GRP0_AVE[wave_data_cnt] = 0.0;
+            // WAVE_GRP1_AVE[wave_data_cnt] = 0.0;
+            // 代替手段としてイテレータを使って初期化する
+            WAVE_GRP0.lock()?.iter_mut().for_each(|x| *x = 0.0);
+            WAVE_GRP1.lock()?.iter_mut().for_each(|x| *x = 0.0);
+            WAVE_GRP0_AVE.lock()?.iter_mut().for_each(|x| *x = 0.0);
+            WAVE_GRP1_AVE.lock()?.iter_mut().for_each(|x| *x = 0.0);
         }
         wave_grp0_cnt = 0;
         wave_grp1_cnt = 0;
@@ -288,6 +285,14 @@ fn main() {
         // 指定した波形数分の解析を行う
         let cipher_lines =
             io::BufReader::new(cipher_file.try_clone().expect("faild clone cipher file")).lines();
+
+        // DPAの結果をファイルに出力準備
+        let wave_diff_file_name =
+            format!("{}/waveDiff_Key{:03}.csv", WAVE_DST_PATH, partial_key_no);
+        println!("wavediffilename: {}", wave_diff_file_name);
+        let wave_diff_file = File::create(&wave_diff_file_name)
+            .expect("[Wave Differential File] file create error!!");
+        let mut writer = io::BufWriter::new(wave_diff_file);
 
         for (dpa_no, cipher_line) in cipher_lines.enumerate() {
             if dpa_no >= MAX_DPA_COUNT {
@@ -301,21 +306,24 @@ fn main() {
             let cipher_text: Vec<uint16_t> = cipher_bytes.iter().map(|&b| b as uint16_t).collect();
 
             // for i in 0..16 {
-            //     key_w[i + 160] = key_buf_bin[i];
+            //     key_w[i + 160] = key_bytes[i] as u16;
             // }
             // 選択関数によって波形データを振り分けるグループを決定
             let sf_group = evaluate_sf(&cipher_text, &key_w);
 
-            unsafe {
-                // 選択関数によって波形データを振り分ける
-                // インデックスの範囲外アクセス対策で，-1している
-                for wave_data_cnt in 0..(END_CNT - START_CNT - 1) {
-                    if sf_group == 1 {
-                        WAVE_GRP1[wave_data_cnt] += WAVE_SRC[dpa_no][wave_data_cnt];
-                    } else if sf_group == 0 {
-                        WAVE_GRP0[wave_data_cnt] += WAVE_SRC[dpa_no][wave_data_cnt];
-                    }
+            // 選択関数によって波形データを振り分ける
+            // インデックスの範囲外アクセス対策で，-1している
+            for wave_data_cnt in 0..(END_CNT - START_CNT - 1) {
+                if sf_group == 1 {
+                    WAVE_GRP1.lock()?[wave_data_cnt] += WAVE_SRC.lock()?[dpa_no][wave_data_cnt];
+                } else if sf_group == 0 {
+                    WAVE_GRP0.lock()?[wave_data_cnt] += WAVE_SRC.lock()?[dpa_no][wave_data_cnt];
                 }
+                // println!("wave_src: {}", WAVE_SRC.lock()?[dpa_no][wave_data_cnt]);
+                // println!("wave_grp0: {}", WAVE_GRP0.lock()?[wave_data_cnt]);
+                // println!("wave_grp1: {}", WAVE_GRP1.lock()?[wave_data_cnt]);
+
+                // println!("wave_src: {}", unsafe { WAVE_SRC[dpa_no][wave_data_cnt] });
             }
             // 各グループの波形数をカウント
             if sf_group == 1 {
@@ -325,41 +333,37 @@ fn main() {
             } else {
                 wave_grp2_cnt += 1;
             }
-            // DPAの結果をファイルに出力
-            let wave_diff_file_name =
-                format!("{}/waveDiff_Key{:03}.csv", WAVE_DST_PATH, partial_key_no);
-            let mut wave_diff_file = File::create(&wave_diff_file_name)
-                .expect("[Wave Differential File] file create error!!");
-            // インデックスの範囲外アクセス対策で，-1している
-            for wave_data_cnt in 0..(END_CNT - START_CNT - 1) {
-                unsafe {
-                    // 各グループで平均電力を計算
-                    let devider = if wave_grp0_cnt != 0 {
-                        wave_grp0_cnt as f64
-                    } else {
-                        1.0
-                    };
-                    WAVE_GRP0_AVE[wave_data_cnt] = WAVE_GRP0[wave_data_cnt] / devider;
-                    let devider = if wave_grp1_cnt != 0 {
-                        wave_grp1_cnt as f64
-                    } else {
-                        1.0
-                    };
-                    WAVE_GRP1_AVE[wave_data_cnt] = WAVE_GRP1[wave_data_cnt] / devider;
-                }
-                // 差分電力を計算 ファイルに書き込み
-                wave_diff_file
-                    .write_all(
-                        format!(
-                            "{:.10},{:.15}\n",
-                            unsafe { WAVE_TIME[wave_data_cnt] * 1000000.0 },
-                            unsafe { WAVE_GRP0_AVE[wave_data_cnt] - WAVE_GRP1_AVE[wave_data_cnt] }
-                        )
-                        .as_bytes(),
-                    )
-                    .expect("[Wave Differential File] file write error!!");
-            }
         }
+        // println!("wave_grp1: {:?}", WAVE_GRP1.lock()?);
+
+        // インデックスの範囲外アクセス対策で，-1している
+        for wave_data_cnt in 0..(END_CNT - START_CNT - 1) {
+            // 各グループで平均電力を計算
+            let devider = if wave_grp0_cnt != 0 {
+                wave_grp0_cnt as f64
+            } else {
+                1.0
+            };
+            WAVE_GRP0_AVE.lock()?[wave_data_cnt] = WAVE_GRP0.lock()?[wave_data_cnt] / devider;
+            let devider = if wave_grp1_cnt != 0 {
+                wave_grp1_cnt as f64
+            } else {
+                1.0
+            };
+            WAVE_GRP1_AVE.lock()?[wave_data_cnt] = WAVE_GRP1.lock()?[wave_data_cnt] / devider;
+
+            // 差分電力を計算 ファイルに書き込み
+            writeln!(
+                writer,
+                "{:.10},{:.15}",
+                WAVE_TIME.lock()?[wave_data_cnt] * 1000000.0,
+                (WAVE_GRP1_AVE.lock()?[wave_data_cnt] - WAVE_GRP0_AVE.lock()?[wave_data_cnt])
+                    * 1000.0
+            )
+            .unwrap();
+        }
+        writer.flush().unwrap();
     }
     println!("\tfinish!");
+    Ok(())
 }
