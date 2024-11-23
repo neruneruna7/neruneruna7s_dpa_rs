@@ -220,40 +220,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut wave_grp1_cnt = 0;
     let mut wave_grp2_cnt = 0;
 
-    println!("Read waveform data...");
-    for dpa_no in 0..MAX_DPA_COUNT {
-        let wave_src_file_name = format!("{}/waveData{}.csv", WAVE_SRC_PATH, dpa_no);
-        let wave_src_file =
-            File::open(&wave_src_file_name).expect("[Wave Source File] file open error!!");
-        println!("wavesrcfilename: {}", wave_src_file_name);
-        let wave_src_lines = io::BufReader::new(wave_src_file).lines();
-
-        for (wave_data_cnt, line) in wave_src_lines.enumerate() {
-            if wave_data_cnt > START_CNT && wave_data_cnt < END_CNT {
-                let line = line.expect("Failed to read line");
-                let parts: Vec<&str> = line.split(',').collect();
-                // 空白が混じっていてパース失敗するケースがあったのでtrimする
-                let wave_time_axis: f64 = parts[0]
-                    .trim()
-                    .parse()
-                    .expect("Failed to parse wave time axis");
-                let wave_amplitude: f64 = parts[1]
-                    .trim()
-                    .parse()
-                    .expect("Failed to parse wave amplitude");
-                WAVE_SRC.lock().unwrap()[dpa_no][wave_data_cnt - START_CNT - 1] = wave_amplitude;
-                if dpa_no == 0 {
-                    WAVE_TIME.lock().unwrap()[wave_data_cnt - START_CNT - 1] = wave_time_axis;
-                }
-            }
-        }
-    }
-    println!("\tfinish!");
+    read_wavedata();
 
     let key_file = File::open(KEY_FNAME).expect("[Key] file open error!!");
     let key_lines = io::BufReader::new(key_file).lines();
 
+    // 暗号文を読み込む
+    // 1行ごとにバイト列に変換してVecに格納
     let cipher_file = File::open(CIPHER_FNAME).expect("[Cipher Text] file open error!!");
+    let cipher_lines = io::BufReader::new(cipher_file).lines();
+    let mut cipher_text = Vec::new();
+    for (_i, c) in cipher_lines.enumerate() {
+        let c = c.expect("Failed to read cipher line");
+        let cipher_text_line: Vec<u8> = c
+            .split_whitespace()
+            .map(|s| u8::from_str_radix(s, 16).expect("Failed to parse cipher byte"))
+            .collect();
+        cipher_text.push(cipher_text_line);
+    }
 
     println!("Differential power analysis...");
     for (partial_key_no, key_line) in key_lines.enumerate() {
@@ -266,25 +250,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             key_w[i + 160] = byte as uint16_t;
         }
 
-        for _wave_data_cnt in 0..(END_CNT - START_CNT) {
-            // indexの範囲外アクセスを起こしている
-            // WAVE_GRP0[wave_data_cnt] = 0.0;
-            // WAVE_GRP1[wave_data_cnt] = 0.0;
-            // WAVE_GRP0_AVE[wave_data_cnt] = 0.0;
-            // WAVE_GRP1_AVE[wave_data_cnt] = 0.0;
-            // 代替手段としてイテレータを使って初期化する
-            WAVE_GRP0.lock()?.iter_mut().for_each(|x| *x = 0.0);
-            WAVE_GRP1.lock()?.iter_mut().for_each(|x| *x = 0.0);
-            WAVE_GRP0_AVE.lock()?.iter_mut().for_each(|x| *x = 0.0);
-            WAVE_GRP1_AVE.lock()?.iter_mut().for_each(|x| *x = 0.0);
-        }
-        wave_grp0_cnt = 0;
-        wave_grp1_cnt = 0;
-        wave_grp2_cnt = 0;
-
-        // 指定した波形数分の解析を行う
-        let cipher_lines =
-            io::BufReader::new(cipher_file.try_clone().expect("faild clone cipher file")).lines();
+        init_analyze_var(&mut wave_grp0_cnt, &mut wave_grp1_cnt, &mut wave_grp2_cnt)?;
 
         // DPAの結果をファイルに出力準備
         let wave_diff_file_name =
@@ -294,16 +260,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             .expect("[Wave Differential File] file create error!!");
         let mut writer = io::BufWriter::new(wave_diff_file);
 
-        for (dpa_no, cipher_line) in cipher_lines.enumerate() {
+        for (dpa_no, cipher_bytes) in cipher_text.iter().enumerate() {
             if dpa_no >= MAX_DPA_COUNT {
+                println!("BREAK: dpa_no: {}", dpa_no);
                 break;
             }
-            let cipher_line = cipher_line.expect("Failed to read cipher line");
-            let cipher_bytes: Vec<u8> = cipher_line
-                .split_whitespace()
-                .map(|s| u8::from_str_radix(s, 16).expect("Failed to parse cipher byte"))
-                .collect();
             let cipher_text: Vec<uint16_t> = cipher_bytes.iter().map(|&b| b as uint16_t).collect();
+            // println!("no: {} cipher_text: {:?}", dpa_no, cipher_text);
 
             // for i in 0..16 {
             //     key_w[i + 160] = key_bytes[i] as u16;
@@ -345,6 +308,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 1.0
             };
             WAVE_GRP0_AVE.lock()?[wave_data_cnt] = WAVE_GRP0.lock()?[wave_data_cnt] / devider;
+
             let devider = if wave_grp1_cnt != 0 {
                 wave_grp1_cnt as f64
             } else {
@@ -353,17 +317,76 @@ fn main() -> Result<(), Box<dyn Error>> {
             WAVE_GRP1_AVE.lock()?[wave_data_cnt] = WAVE_GRP1.lock()?[wave_data_cnt] / devider;
 
             // 差分電力を計算 ファイルに書き込み
-            writeln!(
-                writer,
-                "{:.10},{:.15}",
-                WAVE_TIME.lock()?[wave_data_cnt] * 1000000.0,
-                (WAVE_GRP1_AVE.lock()?[wave_data_cnt] - WAVE_GRP0_AVE.lock()?[wave_data_cnt])
-                    * 1000.0
-            )
-            .unwrap();
+            let left = WAVE_TIME.lock()?[wave_data_cnt] * 1000000.0;
+            let right = (WAVE_GRP1_AVE.lock()?[wave_data_cnt]
+                - WAVE_GRP0_AVE.lock()?[wave_data_cnt])
+                * 1000.0;
+            writeln!(writer, "{:.10},{:.15}", left, right).unwrap();
+            // println!(
+            //     "GR1: {:?}, GR0: {:?}",
+            //     WAVE_GRP1_AVE.lock()?[wave_data_cnt],
+            //     WAVE_GRP0_AVE.lock()?[wave_data_cnt]
+            // );
+            // println!("{:.10},{:.15}", left, right);
         }
         writer.flush().unwrap();
+        println!("Partial Key No: {:03} finish!", partial_key_no);
     }
     println!("\tfinish!");
     Ok(())
+}
+
+fn init_analyze_var(
+    wave_grp0_cnt: &mut i32,
+    wave_grp1_cnt: &mut i32,
+    wave_grp2_cnt: &mut i32,
+) -> Result<(), Box<dyn Error>> {
+    for _wave_data_cnt in 0..(END_CNT - START_CNT) {
+        // indexの範囲外アクセスを起こしている
+        // WAVE_GRP0[wave_data_cnt] = 0.0;
+        // WAVE_GRP1[wave_data_cnt] = 0.0;
+        // WAVE_GRP0_AVE[wave_data_cnt] = 0.0;
+        // WAVE_GRP1_AVE[wave_data_cnt] = 0.0;
+        // 代替手段としてイテレータを使って初期化する
+        WAVE_GRP0.lock()?.iter_mut().for_each(|x| *x = 0.0);
+        WAVE_GRP1.lock()?.iter_mut().for_each(|x| *x = 0.0);
+        WAVE_GRP0_AVE.lock()?.iter_mut().for_each(|x| *x = 0.0);
+        WAVE_GRP1_AVE.lock()?.iter_mut().for_each(|x| *x = 0.0);
+    }
+    *wave_grp0_cnt = 0;
+    *wave_grp1_cnt = 0;
+    *wave_grp2_cnt = 0;
+    Ok(())
+}
+
+fn read_wavedata() {
+    println!("Read waveform data...");
+    for dpa_no in 0..MAX_DPA_COUNT {
+        let wave_src_file_name = format!("{}/waveData{}.csv", WAVE_SRC_PATH, dpa_no);
+        let wave_src_file =
+            File::open(&wave_src_file_name).expect("[Wave Source File] file open error!!");
+        println!("wavesrcfilename: {}", wave_src_file_name);
+        let wave_src_lines = io::BufReader::new(wave_src_file).lines();
+
+        for (wave_data_cnt, line) in wave_src_lines.enumerate() {
+            if wave_data_cnt > START_CNT && wave_data_cnt < END_CNT {
+                let line = line.expect("Failed to read line");
+                let parts: Vec<&str> = line.split(',').collect();
+                // 空白が混じっていてパース失敗するケースがあったのでtrimする
+                let wave_time_axis: f64 = parts[0]
+                    .trim()
+                    .parse()
+                    .expect("Failed to parse wave time axis");
+                let wave_amplitude: f64 = parts[1]
+                    .trim()
+                    .parse()
+                    .expect("Failed to parse wave amplitude");
+                WAVE_SRC.lock().unwrap()[dpa_no][wave_data_cnt - START_CNT - 1] = wave_amplitude;
+                if dpa_no == 0 {
+                    WAVE_TIME.lock().unwrap()[wave_data_cnt - START_CNT - 1] = wave_time_axis;
+                }
+            }
+        }
+    }
+    println!("\tfinish!");
 }
