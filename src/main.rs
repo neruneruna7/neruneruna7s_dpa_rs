@@ -209,11 +209,6 @@ fn evaluate_sf(cipher_text: &[u16], key_w: &[u16]) -> i32 {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut key_w = vec![0u16; 176];
-    let mut wave_grp0_cnt = 0;
-    let mut wave_grp1_cnt = 0;
-    let mut wave_grp2_cnt = 0;
-
     // read_wavedata(WAVE_SRC_PATH)?;
     read_wavedata_parallel(WAVE_SRC_PATH)?;
 
@@ -235,14 +230,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     println!("Differential power analysis...");
-    power_analysis(
-        key_lines,
-        key_w,
-        wave_grp0_cnt,
-        wave_grp1_cnt,
-        wave_grp2_cnt,
-        cipher_text,
-    )?;
+    power_analysis(key_lines, cipher_text)?;
     // power_analysis_parallel(key_lines, cipher_text)?;
     println!("\tfinish!");
     Ok(())
@@ -250,13 +238,14 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 fn power_analysis(
     key_lines: io::Lines<io::BufReader<File>>,
-    mut key_w: Vec<u16>,
-    mut wave_grp0_cnt: i32,
-    mut wave_grp1_cnt: i32,
-    mut wave_grp2_cnt: i32,
     cipher_text: Vec<Vec<u8>>,
 ) -> Result<(), Box<dyn Error>> {
     Ok(for (partial_key_no, key_line) in key_lines.enumerate() {
+        let mut key_w = vec![0u16; 176];
+        let mut wave_grp0_cnt = 0;
+        let mut wave_grp1_cnt = 0;
+        let mut wave_grp2_cnt = 0;
+
         let key_line = key_line.expect("Failed to read key line");
         let key_bytes: Vec<u8> = key_line
             .split_whitespace()
