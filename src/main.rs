@@ -1,27 +1,13 @@
-/*
-****************************************************
+// const DEBUG_SWITCH1: u8 = 0;
 
-     DPA to SASEBO（AES）
-
-     Version 01.00  2010.7.26
-
-****************************************************
-*/
-
-const DEBUG_SWITCH1: u8 = 0;
-
-const CMP_BCC: u8 = 0;
-const CMP_GCC: u8 = 0;
+// const CMP_BCC: u8 = 0;
+// const CMP_GCC: u8 = 0;
 
 use std::error::Error;
-use std::f64::consts::LOG10_E;
+
 use std::fs::File;
 use std::io::{self, BufRead, Write};
-use std::path::Path;
-use std::process::exit;
 use std::sync::{LazyLock, Mutex};
-
-type uint16_t = u16;
 
 const MAX_SAMPLE: usize = 200 - 1; // 解析に使用する消費電力波形のサンプル数
 const START_CNT: usize = 900; // 波形のサンプル点開始点
@@ -66,8 +52,8 @@ const INV_SBOX: [u8; 256] = [
     0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d,
 ];
 
-fn gf_mul_ab(a: uint16_t, b: uint16_t) -> uint16_t {
-    let mut c: uint16_t = 0;
+fn gf_mul_ab(a: u16, b: u16) -> u16 {
+    let mut c: u16 = 0;
     for i in (0..8).rev() {
         for k in (0..8).rev() {
             c ^= (((a >> i) & 1) & ((b >> k) & 1)) << (i + k);
@@ -84,7 +70,7 @@ fn gf_mul_ab(a: uint16_t, b: uint16_t) -> uint16_t {
     c & 0xff
 }
 
-fn gf_inv_of_a(a: uint16_t) -> uint16_t {
+fn gf_inv_of_a(a: u16) -> u16 {
     let ap2 = gf_mul_ab(a, a);
     let ap3 = gf_mul_ab(ap2, a);
     let ap12 = gf_mul_ab(gf_mul_ab(ap3, ap3), gf_mul_ab(ap3, ap3));
@@ -97,7 +83,7 @@ fn gf_inv_of_a(a: uint16_t) -> uint16_t {
     ap254
 }
 
-fn sub_bytes_trans(a: uint16_t) -> uint16_t {
+fn sub_bytes_trans(a: u16) -> u16 {
     let b = gf_inv_of_a(a);
     let mut r = 0;
     let trans = |i: usize| -> u16 {
@@ -118,7 +104,7 @@ fn sub_bytes_trans(a: uint16_t) -> uint16_t {
     r
 }
 
-fn sub_bytes_trans_state(s: &[[uint16_t; 4]; 4], ssb: &mut [[uint16_t; 4]; 4]) {
+fn sub_bytes_trans_state(s: &[[u16; 4]; 4], ssb: &mut [[u16; 4]; 4]) {
     for i in 0..4 {
         for k in 0..4 {
             ssb[i][k] = sub_bytes_trans(s[i][k]);
@@ -126,11 +112,11 @@ fn sub_bytes_trans_state(s: &[[uint16_t; 4]; 4], ssb: &mut [[uint16_t; 4]; 4]) {
     }
 }
 
-fn inv_sub_bytes_trans(a: uint16_t) -> uint16_t {
-    INV_SBOX[a as usize] as uint16_t
+fn inv_sub_bytes_trans(a: u16) -> u16 {
+    INV_SBOX[a as usize] as u16
 }
 
-fn inv_sub_bytes_trans_state(s: &[[uint16_t; 4]; 4], ssb: &mut [[uint16_t; 4]; 4]) {
+fn inv_sub_bytes_trans_state(s: &[[u16; 4]; 4], ssb: &mut [[u16; 4]; 4]) {
     for i in 0..4 {
         for k in 0..4 {
             ssb[i][k] = inv_sub_bytes_trans(s[i][k]);
@@ -138,7 +124,7 @@ fn inv_sub_bytes_trans_state(s: &[[uint16_t; 4]; 4], ssb: &mut [[uint16_t; 4]; 4
     }
 }
 
-fn shift_rows_trans(s: &[[uint16_t; 4]; 4], ssft: &mut [[uint16_t; 4]; 4]) {
+fn shift_rows_trans(s: &[[u16; 4]; 4], ssft: &mut [[u16; 4]; 4]) {
     for i in 0..4 {
         for k in 0..4 {
             ssft[i][k] = s[i][(k + i) % 4];
@@ -146,7 +132,7 @@ fn shift_rows_trans(s: &[[uint16_t; 4]; 4], ssft: &mut [[uint16_t; 4]; 4]) {
     }
 }
 
-fn inv_shift_rows_trans(s: &[[uint16_t; 4]; 4], ssft: &mut [[uint16_t; 4]; 4]) {
+fn inv_shift_rows_trans(s: &[[u16; 4]; 4], ssft: &mut [[u16; 4]; 4]) {
     for i in 0..4 {
         for k in 0..4 {
             ssft[i][k] = s[i][(k + (4 - i)) % 4];
@@ -154,7 +140,7 @@ fn inv_shift_rows_trans(s: &[[uint16_t; 4]; 4], ssft: &mut [[uint16_t; 4]; 4]) {
     }
 }
 
-fn add_round_key_trans(s: &[[uint16_t; 4]; 4], k: &[uint16_t], sak: &mut [[uint16_t; 4]; 4]) {
+fn add_round_key_trans(s: &[[u16; 4]; 4], k: &[u16], sak: &mut [[u16; 4]; 4]) {
     for i in 0..4 {
         sak[0][i] = s[0][i] ^ k[i * 4 + 0];
         sak[1][i] = s[1][i] ^ k[i * 4 + 1];
@@ -163,7 +149,7 @@ fn add_round_key_trans(s: &[[uint16_t; 4]; 4], k: &[uint16_t], sak: &mut [[uint1
     }
 }
 
-fn evaluate_sf(cipher_text: &[uint16_t], key_w: &[uint16_t]) -> i32 {
+fn evaluate_sf(cipher_text: &[u16], key_w: &[u16]) -> i32 {
     let mut s1 = [[0u16; 4]; 4];
     let mut s2 = [[0u16; 4]; 4];
     let mut s3 = [[0u16; 4]; 4];
@@ -247,7 +233,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .map(|s| u8::from_str_radix(s, 16).expect("Failed to parse key byte"))
             .collect();
         for (i, &byte) in key_bytes.iter().enumerate() {
-            key_w[i + 160] = byte as uint16_t;
+            key_w[i + 160] = byte as u16;
         }
 
         init_analyze_var(&mut wave_grp0_cnt, &mut wave_grp1_cnt, &mut wave_grp2_cnt)?;
@@ -265,7 +251,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 println!("BREAK: dpa_no: {}", dpa_no);
                 break;
             }
-            let cipher_text: Vec<uint16_t> = cipher_bytes.iter().map(|&b| b as uint16_t).collect();
+            let cipher_text: Vec<u16> = cipher_bytes.iter().map(|&b| b as u16).collect();
             // println!("no: {} cipher_text: {:?}", dpa_no, cipher_text);
 
             // for i in 0..16 {
