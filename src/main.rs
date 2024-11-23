@@ -229,7 +229,27 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     println!("Differential power analysis...");
-    for (partial_key_no, key_line) in key_lines.enumerate() {
+    power_analysis(
+        key_lines,
+        key_w,
+        wave_grp0_cnt,
+        wave_grp1_cnt,
+        wave_grp2_cnt,
+        cipher_text,
+    )?;
+    println!("\tfinish!");
+    Ok(())
+}
+
+fn power_analysis(
+    key_lines: io::Lines<io::BufReader<File>>,
+    mut key_w: Vec<u16>,
+    mut wave_grp0_cnt: i32,
+    mut wave_grp1_cnt: i32,
+    mut wave_grp2_cnt: i32,
+    cipher_text: Vec<Vec<u8>>,
+) -> Result<(), Box<dyn Error>> {
+    Ok(for (partial_key_no, key_line) in key_lines.enumerate() {
         let key_line = key_line.expect("Failed to read key line");
         let key_bytes: Vec<u8> = key_line
             .split_whitespace()
@@ -320,9 +340,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         writer.flush()?;
         println!("Partial Key No: {:03} finish!", partial_key_no);
-    }
-    println!("\tfinish!");
-    Ok(())
+    })
 }
 
 fn init_analyze_var(
