@@ -20,19 +20,25 @@ const KEY_FNAME: &str = "./dpa_aes_set/dpa_tool_zemi_v3/aes_r10_key_test_s00.txt
 const WAVE_SRC_PATH: &str = "./dpa_aes_set/dpa_data_src_d0"; // 解析に使用する波形データのソースパス
 const WAVE_DST_PATH: &str = "./dpa_aes_set/dpa_results"; // 解析結果の保存場所
 
-// サイズがデカくてスタックに置けないので，ヒープに置く
-static WAVE_SRC: LazyLock<Mutex<Vec<[f64; MAX_SAMPLE]>>> =
-    LazyLock::new(|| Mutex::new(vec![[0.0; MAX_SAMPLE]; MAX_DPA_COUNT])); // 消費電力波形
-static WAVE_TIME: LazyLock<Mutex<Box<[f64; MAX_SAMPLE]>>> =
-    LazyLock::new(|| Mutex::new(Box::new([0.0; MAX_SAMPLE]))); // 時間
-static WAVE_GRP0: LazyLock<Mutex<Box<[f64; MAX_SAMPLE]>>> =
-    LazyLock::new(|| Mutex::new(Box::new([0.0; MAX_SAMPLE]))); // グループ0の消費電力波形
-static WAVE_GRP1: LazyLock<Mutex<Box<[f64; MAX_SAMPLE]>>> =
-    LazyLock::new(|| Mutex::new(Box::new([0.0; MAX_SAMPLE]))); // グループ1の消費電力波形
-static WAVE_GRP0_AVE: LazyLock<Mutex<Box<[f64; MAX_SAMPLE]>>> =
-    LazyLock::new(|| Mutex::new(Box::new([0.0; MAX_SAMPLE]))); // グループ0の平均電力
-static WAVE_GRP1_AVE: LazyLock<Mutex<Box<[f64; MAX_SAMPLE]>>> =
-    LazyLock::new(|| Mutex::new(Box::new([0.0; MAX_SAMPLE]))); // グループ1の平均電力
+// // サイズがデカくてスタックに置けないので，ヒープに置く
+// static WAVE_SRC: LazyLock<Mutex<Vec<[f64; MAX_SAMPLE]>>> =
+//     LazyLock::new(|| Mutex::new(vec![[0.0; MAX_SAMPLE]; MAX_DPA_COUNT])); // 消費電力波形
+// static WAVE_TIME: LazyLock<Mutex<Box<[f64; MAX_SAMPLE]>>> =
+//     LazyLock::new(|| Mutex::new(Box::new([0.0; MAX_SAMPLE]))); // 時間
+// static WAVE_GRP0: LazyLock<Mutex<Box<[f64; MAX_SAMPLE]>>> =
+//     LazyLock::new(|| Mutex::new(Box::new([0.0; MAX_SAMPLE]))); // グループ0の消費電力波形
+// static WAVE_GRP1: LazyLock<Mutex<Box<[f64; MAX_SAMPLE]>>> =
+//     LazyLock::new(|| Mutex::new(Box::new([0.0; MAX_SAMPLE]))); // グループ1の消費電力波形
+// static WAVE_GRP0_AVE: LazyLock<Mutex<Box<[f64; MAX_SAMPLE]>>> =
+//     LazyLock::new(|| Mutex::new(Box::new([0.0; MAX_SAMPLE]))); // グループ0の平均電力
+// static WAVE_GRP1_AVE: LazyLock<Mutex<Box<[f64; MAX_SAMPLE]>>> =
+//     LazyLock::new(|| Mutex::new(Box::new([0.0; MAX_SAMPLE]))); // グループ1の平均電力
+static mut WAVE_SRC: [[f64; MAX_SAMPLE]; MAX_DPA_COUNT] = [[0.0; MAX_SAMPLE]; MAX_DPA_COUNT]; // 消費電力波形
+static mut WAVE_TIME: [f64; MAX_SAMPLE] = [0.0; MAX_SAMPLE];
+static mut WAVE_GRP0: [f64; MAX_SAMPLE] = [0.0; MAX_SAMPLE];
+static mut WAVE_GRP1: [f64; MAX_SAMPLE] = [0.0; MAX_SAMPLE];
+static mut WAVE_GRP0_AVE: [f64; MAX_SAMPLE] = [0.0; MAX_SAMPLE];
+static mut WAVE_GRP1_AVE: [f64; MAX_SAMPLE] = [0.0; MAX_SAMPLE];
 
 // Inverse Sbox
 const INV_SBOX: [u8; 256] = [
@@ -287,11 +293,18 @@ fn power_analysis(
             // 選択関数によって波形データを振り分ける
             // インデックスの範囲外アクセス対策で，-1している
             for wave_data_cnt in 0..(END_CNT - START_CNT - 1) {
-                if sf_group == 1 {
-                    WAVE_GRP1.lock()?[wave_data_cnt] += WAVE_SRC.lock()?[dpa_no][wave_data_cnt];
-                } else if sf_group == 0 {
-                    WAVE_GRP0.lock()?[wave_data_cnt] += WAVE_SRC.lock()?[dpa_no][wave_data_cnt];
+                unsafe {
+                    if sf_group == 1 {
+                        WAVE_GRP1[wave_data_cnt] += WAVE_SRC[dpa_no][wave_data_cnt];
+                    } else if sf_group == 0 {
+                        WAVE_GRP0[wave_data_cnt] += WAVE_SRC[dpa_no][wave_data_cnt];
+                    }
                 }
+                // if sf_group == 1 {
+                //     WAVE_GRP1.lock()?[wave_data_cnt] += WAVE_SRC.lock()?[dpa_no][wave_data_cnt];
+                // } else if sf_group == 0 {
+                //     WAVE_GRP0.lock()?[wave_data_cnt] += WAVE_SRC.lock()?[dpa_no][wave_data_cnt];
+                // }
                 // println!("wave_src: {}", WAVE_SRC.lock()?[dpa_no][wave_data_cnt]);
                 // println!("wave_grp0: {}", WAVE_GRP0.lock()?[wave_data_cnt]);
                 // println!("wave_grp1: {}", WAVE_GRP1.lock()?[wave_data_cnt]);
@@ -317,20 +330,32 @@ fn power_analysis(
             } else {
                 1.0
             };
-            WAVE_GRP0_AVE.lock()?[wave_data_cnt] = WAVE_GRP0.lock()?[wave_data_cnt] / devider;
+            unsafe {
+                WAVE_GRP0_AVE[wave_data_cnt] = WAVE_GRP0[wave_data_cnt] / devider;
+            }
+            // WAVE_GRP0_AVE.lock()?[wave_data_cnt] = WAVE_GRP0.lock()?[wave_data_cnt] / devider;
 
             let devider = if wave_grp1_cnt != 0 {
                 wave_grp1_cnt as f64
             } else {
                 1.0
             };
-            WAVE_GRP1_AVE.lock()?[wave_data_cnt] = WAVE_GRP1.lock()?[wave_data_cnt] / devider;
+            unsafe {
+                WAVE_GRP1_AVE[wave_data_cnt] = WAVE_GRP1[wave_data_cnt] / devider;
+            }
+            // WAVE_GRP1_AVE.lock()?[wave_data_cnt] = WAVE_GRP1.lock()?[wave_data_cnt] / devider;
 
             // 差分電力を計算 ファイルに書き込み
-            let left = WAVE_TIME.lock()?[wave_data_cnt] * 1000000.0;
-            let right = (WAVE_GRP1_AVE.lock()?[wave_data_cnt]
-                - WAVE_GRP0_AVE.lock()?[wave_data_cnt])
-                * 1000.0;
+            let (left, right) = unsafe {
+                (
+                    WAVE_TIME[wave_data_cnt] * 1000000.0,
+                    (WAVE_GRP1_AVE[wave_data_cnt] - WAVE_GRP0_AVE[wave_data_cnt]) * 1000.0,
+                )
+            };
+            // let left = WAVE_TIME.lock()?[wave_data_cnt] * 1000000.0;
+            // let right = (WAVE_GRP1_AVE.lock()?[wave_data_cnt]
+            //     - WAVE_GRP0_AVE.lock()?[wave_data_cnt])
+            //     * 1000.0;
             writeln!(writer, "{:.10},{:.15}", left, right)?;
             // println!(
             //     "GR1: {:?}, GR0: {:?}",
@@ -395,13 +420,20 @@ fn power_analysis_parallel(
                 // 選択関数によって波形データを振り分ける
                 // インデックスの範囲外アクセス対策で，-1している
                 for wave_data_cnt in 0..(END_CNT - START_CNT - 1) {
-                    if sf_group == 1 {
-                        WAVE_GRP1.lock().unwrap()[wave_data_cnt] +=
-                            WAVE_SRC.lock().unwrap()[dpa_no][wave_data_cnt];
-                    } else if sf_group == 0 {
-                        WAVE_GRP0.lock().unwrap()[wave_data_cnt] +=
-                            WAVE_SRC.lock().unwrap()[dpa_no][wave_data_cnt];
+                    unsafe {
+                        if sf_group == 1 {
+                            WAVE_GRP1[wave_data_cnt] += WAVE_SRC[dpa_no][wave_data_cnt];
+                        } else if sf_group == 0 {
+                            WAVE_GRP0[wave_data_cnt] += WAVE_SRC[dpa_no][wave_data_cnt];
+                        }
                     }
+                    // if sf_group == 1 {
+                    //     WAVE_GRP1.lock().unwrap()[wave_data_cnt] +=
+                    //         WAVE_SRC.lock().unwrap()[dpa_no][wave_data_cnt];
+                    // } else if sf_group == 0 {
+                    //     WAVE_GRP0.lock().unwrap()[wave_data_cnt] +=
+                    //         WAVE_SRC.lock().unwrap()[dpa_no][wave_data_cnt];
+                    // }
                     // println!("wave_src: {}", WAVE_SRC.lock()?[dpa_no][wave_data_cnt]);
                     // println!("wave_grp0: {}", WAVE_GRP0.lock()?[wave_data_cnt]);
                     // println!("wave_grp1: {}", WAVE_GRP1.lock()?[wave_data_cnt]);
@@ -427,22 +459,34 @@ fn power_analysis_parallel(
                 } else {
                     1.0
                 };
-                WAVE_GRP0_AVE.lock().unwrap()[wave_data_cnt] =
-                    WAVE_GRP0.lock().unwrap()[wave_data_cnt] / devider;
+                unsafe {
+                    WAVE_GRP0_AVE[wave_data_cnt] = WAVE_GRP0[wave_data_cnt] / devider;
+                }
+                // WAVE_GRP0_AVE.lock().unwrap()[wave_data_cnt] =
+                //     WAVE_GRP0.lock().unwrap()[wave_data_cnt] / devider;
 
                 let devider = if wave_grp1_cnt != 0 {
                     wave_grp1_cnt as f64
                 } else {
                     1.0
                 };
-                WAVE_GRP1_AVE.lock().unwrap()[wave_data_cnt] =
-                    WAVE_GRP1.lock().unwrap()[wave_data_cnt] / devider;
+                unsafe {
+                    WAVE_GRP1_AVE[wave_data_cnt] = WAVE_GRP1[wave_data_cnt] / devider;
+                }
+                // WAVE_GRP1_AVE.lock().unwrap()[wave_data_cnt] =
+                //     WAVE_GRP1.lock().unwrap()[wave_data_cnt] / devider;
 
                 // 差分電力を計算 ファイルに書き込み
-                let left = WAVE_TIME.lock().unwrap()[wave_data_cnt] * 1000000.0;
-                let right = (WAVE_GRP1_AVE.lock().unwrap()[wave_data_cnt]
-                    - WAVE_GRP0_AVE.lock().unwrap()[wave_data_cnt])
-                    * 1000.0;
+                let (left, right) = unsafe {
+                    (
+                        WAVE_TIME[wave_data_cnt] * 1000000.0,
+                        (WAVE_GRP1_AVE[wave_data_cnt] - WAVE_GRP0_AVE[wave_data_cnt]) * 1000.0,
+                    )
+                };
+                // let left = WAVE_TIME.lock().unwrap()[wave_data_cnt] * 1000000.0;
+                // let right = (WAVE_GRP1_AVE.lock().unwrap()[wave_data_cnt]
+                //     - WAVE_GRP0_AVE.lock().unwrap()[wave_data_cnt])
+                //     * 1000.0;
                 writeln!(writer, "{:.10},{:.15}", left, right)?;
                 // println!(
                 //     "GR1: {:?}, GR0: {:?}",
@@ -469,10 +513,16 @@ fn init_analyze_var(
         // WAVE_GRP0_AVE[wave_data_cnt] = 0.0;
         // WAVE_GRP1_AVE[wave_data_cnt] = 0.0;
         // 代替手段としてイテレータを使って初期化する
-        WAVE_GRP0.lock()?.iter_mut().for_each(|x| *x = 0.0);
-        WAVE_GRP1.lock()?.iter_mut().for_each(|x| *x = 0.0);
-        WAVE_GRP0_AVE.lock()?.iter_mut().for_each(|x| *x = 0.0);
-        WAVE_GRP1_AVE.lock()?.iter_mut().for_each(|x| *x = 0.0);
+        unsafe {
+            WAVE_GRP0.iter_mut().for_each(|x| *x = 0.0);
+            WAVE_GRP1.iter_mut().for_each(|x| *x = 0.0);
+            WAVE_GRP0_AVE.iter_mut().for_each(|x| *x = 0.0);
+            WAVE_GRP1_AVE.iter_mut().for_each(|x| *x = 0.0);
+        }
+        // WAVE_GRP0.lock()?.iter_mut().for_each(|x| *x = 0.0);
+        // WAVE_GRP1.lock()?.iter_mut().for_each(|x| *x = 0.0);
+        // WAVE_GRP0_AVE.lock()?.iter_mut().for_each(|x| *x = 0.0);
+        // WAVE_GRP1_AVE.lock()?.iter_mut().for_each(|x| *x = 0.0);
     }
     *wave_grp0_cnt = 0;
     *wave_grp1_cnt = 0;
@@ -502,10 +552,16 @@ fn read_wavedata(folder_path: &str) -> Result<(), Box<dyn Error>> {
                     .trim()
                     .parse()
                     .expect("Failed to parse wave amplitude");
-                WAVE_SRC.lock()?[dpa_no][wave_data_cnt - START_CNT - 1] = wave_amplitude;
-                if dpa_no == 0 {
-                    WAVE_TIME.lock()?[wave_data_cnt - START_CNT - 1] = wave_time_axis;
+                unsafe {
+                    WAVE_SRC[dpa_no][wave_data_cnt - START_CNT - 1] = wave_amplitude;
+                    if dpa_no == 0 {
+                        WAVE_TIME[wave_data_cnt - START_CNT - 1] = wave_time_axis;
+                    }
                 }
+                // WAVE_SRC.lock()?[dpa_no][wave_data_cnt - START_CNT - 1] = wave_amplitude;
+                // if dpa_no == 0 {
+                //     WAVE_TIME.lock()?[wave_data_cnt - START_CNT - 1] = wave_time_axis;
+                // }
             }
         }
     }
@@ -533,10 +589,16 @@ fn read_wavedata_parallel(folder_path: &str) -> anyhow::Result<()> {
                     .trim()
                     .parse()
                     .expect("Failed to parse wave amplitude");
-                WAVE_SRC.lock().unwrap()[dpa_no][wave_data_cnt - START_CNT - 1] = wave_amplitude;
-                if dpa_no == 0 {
-                    WAVE_TIME.lock().unwrap()[wave_data_cnt - START_CNT - 1] = wave_time_axis;
+                unsafe {
+                    WAVE_SRC[dpa_no][wave_data_cnt - START_CNT - 1] = wave_amplitude;
+                    if dpa_no == 0 {
+                        WAVE_TIME[wave_data_cnt - START_CNT - 1] = wave_time_axis;
+                    }
                 }
+                // WAVE_SRC.lock().unwrap()[dpa_no][wave_data_cnt - START_CNT - 1] = wave_amplitude;
+                // if dpa_no == 0 {
+                //     WAVE_TIME.lock().unwrap()[wave_data_cnt - START_CNT - 1] = wave_time_axis;
+                // }
             }
         }
         Ok(())
