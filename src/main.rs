@@ -390,3 +390,43 @@ fn read_wavedata() {
     }
     println!("\tfinish!");
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs::File,
+        io::{self, BufRead},
+    };
+
+    // C実装で出力されたものと，Rust実装で出力されたものが一致するか確認する
+    const C_RESULT_PATH: &str = "../dpa_c/dpa_aes_set/dpa_results";
+    const RUST_RESULT_PATH: &str = "./dpa_aes_set/dpa_results";
+
+    #[test]
+    fn test_result() {
+        for i in 0..256 {
+            let c_result_path = format!("{}/WaveDiff_Key{:03}.csv", C_RESULT_PATH, i);
+            let rust_result_path = format!("{}/waveDiff_Key{:03}.csv", RUST_RESULT_PATH, i);
+            let c_result_file = File::open(c_result_path).expect("C result file open error");
+            let rust_result_file =
+                File::open(rust_result_path).expect("Rust result file open error");
+            // ioBuf
+            let c_result_lines = io::BufReader::new(c_result_file).lines();
+            let rust_result_lines = io::BufReader::new(rust_result_file).lines();
+            for (c_line, rust_line) in c_result_lines.zip(rust_result_lines) {
+                let c_line = c_line.expect("Failed to read C result line");
+                let rust_line = rust_line.expect("Failed to read Rust result line");
+                // カンマ区切りで数値に変換して比較
+                let c_line: Vec<f64> = c_line
+                    .split(',')
+                    .map(|s| s.trim().parse().expect("Failed to parse C result line"))
+                    .collect();
+                let rust_line: Vec<f64> = rust_line
+                    .split(',')
+                    .map(|s| s.trim().parse().expect("Failed to parse Rust result line"))
+                    .collect();
+                assert_eq!(c_line, rust_line);
+            }
+        }
+    }
+}
