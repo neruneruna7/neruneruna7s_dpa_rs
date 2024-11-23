@@ -242,100 +242,103 @@ fn power_analysis(
     wave_src: HashMap<usize, [f64; MAX_SAMPLE]>,
     wave_time: [f64; MAX_SAMPLE],
 ) -> anyhow::Result<()> {
-    for (partial_key_no, key_line) in keys.iter().enumerate() {
-        let mut key_w = vec![0u16; 176];
-        let mut wave_grp0_cnt = 0;
-        let mut wave_grp1_cnt = 0;
-        let mut wave_grp2_cnt = 0;
-        let mut wave_grp0 = [0.0; MAX_SAMPLE];
-        let mut wave_grp1 = [0.0; MAX_SAMPLE];
-        let mut wave_grp0_ave = [0.0; MAX_SAMPLE];
-        let mut wave_grp1_ave = [0.0; MAX_SAMPLE];
+    keys.into_par_iter()
+        .enumerate()
+        .try_for_each(|(partial_key_no, key_line)| {
+            let mut key_w = vec![0u16; 176];
+            let mut wave_grp0_cnt = 0;
+            let mut wave_grp1_cnt = 0;
+            let mut wave_grp2_cnt = 0;
+            let mut wave_grp0 = [0.0; MAX_SAMPLE];
+            let mut wave_grp1 = [0.0; MAX_SAMPLE];
+            let mut wave_grp0_ave = [0.0; MAX_SAMPLE];
+            let mut wave_grp1_ave = [0.0; MAX_SAMPLE];
 
-        for (i, &byte) in key_line.iter().enumerate() {
-            key_w[i + 160] = byte as u16;
-        }
-
-        // DPAの結果をファイルに出力準備
-        let wave_diff_file_name =
-            format!("{}/waveDiff_Key{:03}.csv", WAVE_DST_PATH, partial_key_no);
-        println!("wavediffilename: {}", wave_diff_file_name);
-        let wave_diff_file = File::create(&wave_diff_file_name)
-            .expect("[Wave Differential File] file create error!!");
-        let mut writer = io::BufWriter::new(wave_diff_file);
-
-        for (dpa_no, cipher_bytes) in cipher_text.iter().enumerate() {
-            if dpa_no >= MAX_DPA_COUNT {
-                println!("BREAK: dpa_no: {}", dpa_no);
-                break;
+            for (i, &byte) in key_line.iter().enumerate() {
+                key_w[i + 160] = byte as u16;
             }
-            let cipher_text: Vec<u16> = cipher_bytes.iter().map(|&b| b as u16).collect();
-            // println!("no: {} cipher_text: {:?}", dpa_no, cipher_text);
-            // 選択関数によって波形データを振り分けるグループを決定
-            let sf_group = evaluate_sf(&cipher_text, &key_w);
 
-            // 選択関数によって波形データを振り分ける
+            // DPAの結果をファイルに出力準備
+            let wave_diff_file_name =
+                format!("{}/waveDiff_Key{:03}.csv", WAVE_DST_PATH, partial_key_no);
+            println!("wavediffilename: {}", wave_diff_file_name);
+            let wave_diff_file = File::create(&wave_diff_file_name)
+                .expect("[Wave Differential File] file create error!!");
+            let mut writer = io::BufWriter::new(wave_diff_file);
+
+            for (dpa_no, cipher_bytes) in cipher_text.iter().enumerate() {
+                if dpa_no >= MAX_DPA_COUNT {
+                    println!("BREAK: dpa_no: {}", dpa_no);
+                    break;
+                }
+                let cipher_text: Vec<u16> = cipher_bytes.iter().map(|&b| b as u16).collect();
+                // println!("no: {} cipher_text: {:?}", dpa_no, cipher_text);
+                // 選択関数によって波形データを振り分けるグループを決定
+                let sf_group = evaluate_sf(&cipher_text, &key_w);
+
+                // 選択関数によって波形データを振り分ける
+                // インデックスの範囲外アクセス対策で，-1している
+                for wave_data_cnt in 0..(END_CNT - START_CNT - 1) {
+                    if sf_group == 1 {
+                        wave_grp1[wave_data_cnt] += wave_src[&dpa_no][wave_data_cnt];
+                    } else if sf_group == 0 {
+                        wave_grp0[wave_data_cnt] += wave_src[&dpa_no][wave_data_cnt];
+                    }
+                    // println!("wave_src: {}", WAVE_SRC.lock()?[dpa_no][wave_data_cnt]);
+                    // println!("wave_grp0: {}", WAVE_GRP0.lock()?[wave_data_cnt]);
+                    // println!("wave_grp1: {}", WAVE_GRP1.lock()?[wave_data_cnt]);
+
+                    // println!("wave_src: {}", unsafe { WAVE_SRC[dpa_no][wave_data_cnt] });
+                }
+                // 各グループの波形数をカウント
+                if sf_group == 1 {
+                    wave_grp1_cnt += 1;
+                } else if sf_group == 0 {
+                    wave_grp0_cnt += 1;
+                } else {
+                    wave_grp2_cnt += 1;
+                }
+            }
+            // println!("wave_grp1: {:?}", WAVE_GRP1.lock()?);
+
             // インデックスの範囲外アクセス対策で，-1している
             for wave_data_cnt in 0..(END_CNT - START_CNT - 1) {
-                if sf_group == 1 {
-                    wave_grp1[wave_data_cnt] += wave_src[&dpa_no][wave_data_cnt];
-                } else if sf_group == 0 {
-                    wave_grp0[wave_data_cnt] += wave_src[&dpa_no][wave_data_cnt];
-                }
-                // println!("wave_src: {}", WAVE_SRC.lock()?[dpa_no][wave_data_cnt]);
-                // println!("wave_grp0: {}", WAVE_GRP0.lock()?[wave_data_cnt]);
-                // println!("wave_grp1: {}", WAVE_GRP1.lock()?[wave_data_cnt]);
+                // 各グループで平均電力を計算
+                let devider = if wave_grp0_cnt != 0 {
+                    wave_grp0_cnt as f64
+                } else {
+                    1.0
+                };
 
-                // println!("wave_src: {}", unsafe { WAVE_SRC[dpa_no][wave_data_cnt] });
+                wave_grp0_ave[wave_data_cnt] = wave_grp0[wave_data_cnt] / devider;
+
+                let devider = if wave_grp1_cnt != 0 {
+                    wave_grp1_cnt as f64
+                } else {
+                    1.0
+                };
+                wave_grp1_ave[wave_data_cnt] = wave_grp1[wave_data_cnt] / devider;
+                // WAVE_GRP1_AVE.lock()?[wave_data_cnt] = WAVE_GRP1.lock()?[wave_data_cnt] / devider;
+
+                // 差分電力を計算 ファイルに書き込み
+                let (left, right) = {
+                    (
+                        wave_time[wave_data_cnt] * 1000000.0,
+                        (wave_grp1_ave[wave_data_cnt] - wave_grp0_ave[wave_data_cnt]) * 1000.0,
+                    )
+                };
+                writeln!(writer, "{:.10},{:.15}", left, right)?;
+                // println!(
+                //     "GR1: {:?}, GR0: {:?}",
+                //     WAVE_GRP1_AVE.lock()?[wave_data_cnt],
+                //     WAVE_GRP0_AVE.lock()?[wave_data_cnt]
+                // );
+                // println!("{:.10},{:.15}", left, right);
             }
-            // 各グループの波形数をカウント
-            if sf_group == 1 {
-                wave_grp1_cnt += 1;
-            } else if sf_group == 0 {
-                wave_grp0_cnt += 1;
-            } else {
-                wave_grp2_cnt += 1;
-            }
-        }
-        // println!("wave_grp1: {:?}", WAVE_GRP1.lock()?);
-
-        // インデックスの範囲外アクセス対策で，-1している
-        for wave_data_cnt in 0..(END_CNT - START_CNT - 1) {
-            // 各グループで平均電力を計算
-            let devider = if wave_grp0_cnt != 0 {
-                wave_grp0_cnt as f64
-            } else {
-                1.0
-            };
-
-            wave_grp0_ave[wave_data_cnt] = wave_grp0[wave_data_cnt] / devider;
-
-            let devider = if wave_grp1_cnt != 0 {
-                wave_grp1_cnt as f64
-            } else {
-                1.0
-            };
-            wave_grp1_ave[wave_data_cnt] = wave_grp1[wave_data_cnt] / devider;
-            // WAVE_GRP1_AVE.lock()?[wave_data_cnt] = WAVE_GRP1.lock()?[wave_data_cnt] / devider;
-
-            // 差分電力を計算 ファイルに書き込み
-            let (left, right) = {
-                (
-                    wave_time[wave_data_cnt] * 1000000.0,
-                    (wave_grp1_ave[wave_data_cnt] - wave_grp0_ave[wave_data_cnt]) * 1000.0,
-                )
-            };
-            writeln!(writer, "{:.10},{:.15}", left, right)?;
-            // println!(
-            //     "GR1: {:?}, GR0: {:?}",
-            //     WAVE_GRP1_AVE.lock()?[wave_data_cnt],
-            //     WAVE_GRP0_AVE.lock()?[wave_data_cnt]
-            // );
-            // println!("{:.10},{:.15}", left, right);
-        }
-        writer.flush()?;
-        println!("Partial Key No: {:03} finish!", partial_key_no);
-    }
+            writer.flush()?;
+            println!("Partial Key No: {:03} finish!", partial_key_no);
+            Ok(())
+        })?;
     Ok(())
 }
 
